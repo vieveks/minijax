@@ -7,8 +7,6 @@ import haiku as hk
 import optax
 from functools import partial
 
-# Assuming stoi, itos, train_data, and val_data are defined similarly as before
-
 # Hyperparameters
 batch_size = 32
 block_size = 8
@@ -43,11 +41,6 @@ split_index = int(0.9 * len(encoded_text))
 train_data = encoded_text[:split_index]
 val_data = encoded_text[split_index:]
 
-import jax
-import jax.numpy as jnp
-import haiku as hk
-import optax
-
 # Define the bigram model
 class BigramModel(hk.Module):
     def __init__(self, vocab_size):
@@ -68,10 +61,7 @@ def forward_pass(inputs):
     model = BigramModel(vocab_size=vocab_size)
     return model(inputs)
 
-# Dummy data and parameters
-# vocab_size = 100  # Example vocabulary size
-# batch_size = 32
-sequence_length = 8
+sequence_length = block_size
 
 # Randomly generate some input data
 inputs = jax.random.randint(jax.random.PRNGKey(42), (batch_size, sequence_length), 0, vocab_size)
@@ -97,10 +87,6 @@ def update(params, inputs, targets, learning_rate=0.01):
 
 # Initialize optimizer state
 opt_state = optax.sgd(learning_rate=0.01).init(params)
-
-# Update the model (example)
-# for _ in range(max_iters):  # Dummy training loop
-#     params, opt_state = update(params, inputs, targets, learning_rate=0.01)
 
 print_every = 100  # Print the loss every 100 iterations
 max_iters = 10000
