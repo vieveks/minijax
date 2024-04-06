@@ -128,16 +128,6 @@ class GPTLanguageModel(hk.Module):
 
         return logits, loss
 
-    # def generate(self, idx, max_new_tokens, rng_key):
-    #     for _ in range(max_new_tokens):
-    #         logits, _ = self(idx)
-    #         logits = logits[:, -1, :]
-    #         probs = jax.nn.softmax(logits, axis=-1)
-    #         rng_key, subkey = random.split(rng_key)
-    #         idx_next = random.categorical(subkey, probs)
-    #         idx_next = jnp.expand_dims(idx_next, axis=-1)
-    #         idx = jnp.concatenate((idx, idx_next), axis=1)
-    #     return idx
 
     def generate(self, idx, max_new_tokens, rng_key):
         for _ in range(max_new_tokens):
