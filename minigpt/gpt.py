@@ -1,210 +1,229 @@
-import jax
-import jax.numpy as jnp
-from jax import random
 import haiku as hk
+import jax.numpy as jnp
+import jax
+from jax import random
 import optax
-from functools import partial
-import numpy as np
+from jax import grad , jit
 
-# Assuming necessary imports and data preprocessing as before
+# Hyperparameters
 batch_size = 32
 block_size = 8
-# max_iters = 3000
-max_iters = 50
-eval_interval = 50
+max_iters = 3000
+eval_interval = 300
 learning_rate = 1e-2
+eval_iters = 200
 
-# Initialize PRNG
-key = random.PRNGKey(1337)
-
-# wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+# Data loading
 with open('input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-# here are all the unique characters that occur in this text
+
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
 
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+def encode(s):
+    return jnp.array([stoi[c] for c in s], dtype=jnp.int32)
 
-# Assuming `stoi` is a dictionary mapping characters to integer indices
-encoded_text = jnp.array([stoi[c] for c in text if c in stoi], dtype=jnp.int32)
+def decode(l):
+    return ''.join([itos[i] for i in l])
 
+data = encode(text)
+n = int(0.9 * len(data))
+train_data = data[:n]
+val_data = data[n:]
 
-# Split the encoded text into training and validation sets
-split_index = int(0.9 * len(encoded_text))
-train_data = encoded_text[:split_index]
-val_data = encoded_text[split_index:]
+print(train_data[:100])
+print(text[:100])
+input('Press enter to continue...')
 
-# Define a simplified version of the Multi-Head Attention used in GPT-2
-class MultiHeadAttention(hk.Module):
-    def __init__(self, d_model, num_heads):
+# now the batch 
+def get_batch(split, train_data, val_data, block_size, batch_size, rng_key):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == 'train' else val_data
+    data_size = len(data)
+    
+    # generate random indices
+    ix = random.randint(rng_key, (batch_size,), 0, data_size - block_size)
+    
+    # create input and target arrays
+    x = jnp.stack([data[i:i+block_size] for i in ix])
+    y = jnp.stack([data[i+1:i+block_size+1] for i in ix])
+    
+    return x, y
+
+# Example usage
+# block_size = 8
+# batch_size = 4
+
+rng_key = random.PRNGKey(42)
+rng_key, subkey = random.split(rng_key)
+train_batch = get_batch('train', train_data, val_data, block_size, batch_size, subkey)
+rng_key, subkey = random.split(rng_key)
+val_batch = get_batch('val', train_data, val_data, block_size, batch_size, subkey)
+print(train_batch[1].shape)
+print(train_batch[0].shape)
+input('got the batch shapes, press enter to continue...')
+rng_key = random.PRNGKey(42)   # random key for reproducibility
+
+# get a batch of training data
+rng_key, subkey = random.split(rng_key)
+train_batch = get_batch('train', train_data, val_data, block_size, batch_size, subkey)
+
+# get a batch of validation data
+rng_key, subkey = random.split(rng_key)
+val_batch = get_batch('val', train_data, val_data, block_size, batch_size, subkey)
+
+input('got the batch shapes, press enter to continue...')
+
+# Hyperparameters
+batch_size = 32
+block_size = 8
+# max_iters = 3000
+# eval_interval = 300
+max_iters = 50
+eval_interval = 5
+learning_rate = 1e-2
+eval_iters = 200
+n_embd = 64
+n_head = 4
+n_layer = 4
+dropout = 0.2
+
+class GPTLanguageModel(hk.Module):
+    def __init__(self, vocab_size, n_embd, n_head, n_layer, block_size, dropout):
         super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.depth = d_model // self.num_heads
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.n_layer = n_layer
+        self.block_size = block_size
+        self.dropout = dropout
 
-        self.wq = hk.Linear(self.d_model)
-        self.wk = hk.Linear(self.d_model)
-        self.wv = hk.Linear(self.d_model)
+    def __call__(self, idx, targets=None):
+        token_embedding_table = hk.Embed(self.vocab_size, self.n_embd)
+        position_embedding_table = hk.Embed(self.block_size, self.n_embd)
+        x = token_embedding_table(idx) + position_embedding_table(jnp.arange(idx.shape[1]))
+        x = hk.dropout(hk.next_rng_key(), self.dropout, x)
 
-        self.dense = hk.Linear(self.d_model)
+        for _ in range(self.n_layer):
+            x = hk.MultiHeadAttention(self.n_head, self.n_embd // self.n_head, w_init_scale=1.0)(x, x, x)
+            x = hk.dropout(hk.next_rng_key(), self.dropout, x)
+            x = hk.Linear(4 * self.n_embd)(x)
+            x = jax.nn.gelu(x)
+            x = hk.Linear(self.n_embd)(x)
+            x = hk.dropout(hk.next_rng_key(), self.dropout, x)
 
-    def split_heads(self, x, batch_size):
-        """Split the last dimension into (num_heads, depth)."""
-        x = x.reshape(batch_size, -1, self.num_heads, self.depth)
-        return x.transpose(0, 2, 1, 3)
+        x = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(x)
+        logits = hk.Linear(self.vocab_size)(x)
 
-    def scaled_dot_product_attention(self, q, k, v):
-        matmul_qk = jnp.matmul(q, k.transpose(0, 1, 3, 2))
-        depth = q.shape[-1]
-        logits = matmul_qk / jnp.sqrt(depth)
-        attention_weights = jax.nn.softmax(logits, axis=-1)
-        output = jnp.matmul(attention_weights, v)
-        return output
+        if targets is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = jnp.reshape(logits, (B * T, C))
+            targets = jnp.reshape(targets, (B * T,))
+            loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=jax.nn.one_hot(targets, num_classes=self.vocab_size)))
 
-    def __call__(self, v, k, q):
-        batch_size = q.shape[0]
+        return logits, loss
 
-        q = self.split_heads(self.wq(q), batch_size)
-        k = self.split_heads(self.wk(k), batch_size)
-        v = self.split_heads(self.wv(v), batch_size)
+    # def generate(self, idx, max_new_tokens, rng_key):
+    #     for _ in range(max_new_tokens):
+    #         logits, _ = self(idx)
+    #         logits = logits[:, -1, :]
+    #         probs = jax.nn.softmax(logits, axis=-1)
+    #         rng_key, subkey = random.split(rng_key)
+    #         idx_next = random.categorical(subkey, probs)
+    #         idx_next = jnp.expand_dims(idx_next, axis=-1)
+    #         idx = jnp.concatenate((idx, idx_next), axis=1)
+    #     return idx
 
-        # Assuming you have a function for scaled dot-product attention
-        attn_output = self.scaled_dot_product_attention(q, k, v)  # Shape: (batch_size, num_heads, seq_length, depth)
+    def generate(self, idx, max_new_tokens, rng_key):
+        for _ in range(max_new_tokens):
+            rng_key, subkey = random.split(rng_key)  # Splitting the rng_key for each iteration
+            logits, _ = self(idx, rng_key=subkey)  # Pass the subkey to the model call
+            logits = logits[:, -1, :]
+            probs = jax.nn.softmax(logits, axis=-1)
+            idx_next = random.categorical(subkey, probs)
+            idx_next = jnp.expand_dims(idx_next, axis=-1)
+            idx = jnp.concatenate((idx, idx_next), axis=1)
+        return idx
 
-        # Step 1: Concatenate the heads
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(batch_size, -1, self.d_model)
 
-        # Step 2: Optionally apply a dense layer if you want to project back to original dimensionality
-        # This step might be included depending on your specific implementation and needs
-        attn_output = self.dense(attn_output)  # Shape: (batch_size, seq_length, d_model)
+def model_fn(vocab_size, n_embd, n_head, n_layer, block_size, dropout):
+    def forward_fn(idx, targets=None):
+        model = GPTLanguageModel(vocab_size, n_embd, n_head, n_layer, block_size, dropout)
+        return model(idx, targets)
+    return forward_fn
 
-        return attn_output
+def generate_fn( rng_key,tokens, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout):
+    model = GPTLanguageModel(vocab_size, n_embd, n_head, n_layer, block_size, dropout)
+    return model.generate(tokens, max_new_tokens, rng_key)
 
-# Define the Transformer block
-class TransformerBlock(hk.Module):
-    def __init__(self, d_model, num_heads):
-        super().__init__()
-        self.mha = MultiHeadAttention(d_model, num_heads)
-        self.ffn = hk.Sequential([
-            hk.Linear(d_model * 4),
-            jax.nn.relu,
-            hk.Linear(d_model),
-        ])
-        self.layernorm1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
-        self.layernorm2 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+# Create the model
+hk_model = hk.transform(lambda tokens, targets=None: model_fn(vocab_size, n_embd, n_head, n_layer, block_size, dropout)(tokens, targets))
+hk_generate = hk.transform(lambda rng_key, tokens, max_new_tokens: generate_fn(tokens, rng_key, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout))
 
-    def __call__(self, x):
-        attn_output = self.mha(x, x, x)  # Simplified for illustration
-        out1 = self.layernorm1(x + attn_output)
-        ffn_output = self.ffn(out1)
-        out2 = self.layernorm2(out1 + ffn_output)
-        return out2
+# Initialize the model parameters
+rng_key = jax.random.PRNGKey(42)
+x, y = get_batch('train', train_data, val_data, block_size, batch_size, rng_key)
+params = hk_model.init(rng_key, x, y)
 
-# Define the GPT-2 Model
-class GPT2Model(hk.Module):
-    def __init__(self, vocab_size, d_model, num_heads, num_layers):
-        super().__init__()
-        self.embedding = hk.Embed(vocab_size, d_model)
-        self.pos_encoding = hk.get_parameter("pos_encoding", [1, block_size, d_model], init=hk.initializers.RandomNormal())
-        self.transformer_blocks = [TransformerBlock(d_model, num_heads) for _ in range(num_layers)]
-        self.final_layer = hk.Linear(vocab_size)
+# Apply the model
+logits, loss = hk_model.apply(params, rng_key, x, y)
+print(f'logits are {logits}')
+print(f'loss is {loss}')
 
-    def __call__(self, x):
-        seq_length = x.shape[1]
-        positions = jnp.arange(seq_length)[None, :]
-        
-        x = self.embedding(x)
-        x += self.pos_encoding[:, :seq_length, :]
-        
-        for transformer_block in self.transformer_blocks:
-            x = transformer_block(x)
-        
-        logits = self.final_layer(x)
-        return logits
+input('now generating the text proceed? ')
 
-# Transform the model to be used with Haiku
-def gpt2_forward_pass(inputs):
-    model = GPT2Model(vocab_size=vocab_size, d_model=512, num_heads=8, num_layers=12)
-    return model(inputs)
+# Training loop
+input('Starting the training proceed ?')
 
-sequence_length = 8
+@jit
+def train_step(params, rng_key, x, y, optimizer_state):
+    def loss_fn(params, x, y):
+        logits, loss = hk_model.apply(params, rng_key, x, y)
+        return loss
 
-# Randomly generate some input data
-inputs = jax.random.randint(jax.random.PRNGKey(42), (batch_size, sequence_length), 0, vocab_size)
-targets = jax.random.randint(jax.random.PRNGKey(43), (batch_size, sequence_length), 0, vocab_size)
-
-print("Input:\n", inputs[0])
-print("Targets:\n", targets[0])
-input('Press Enter to continue...')
-
-# Initialize the model
-gpt2_model = hk.transform(gpt2_forward_pass)
-params = gpt2_model.init(jax.random.PRNGKey(42), inputs)
-
-# Define the loss function
-def gpt2_loss_fn(params, inputs, targets):
-    logits = gpt2_model.apply(params, None, inputs)
-    # Use softmax cross entropy as the loss
-    loss = optax.softmax_cross_entropy(logits=logits, labels=jax.nn.one_hot(targets, vocab_size))
-    return jnp.mean(loss)
-
-# Example of updating the model parameters
-def gpt2_update(params, inputs, targets, learning_rate=0.01):
-    grads = jax.grad(gpt2_loss_fn)(params, inputs, targets)
-    updates, new_opt_state = optax.sgd(learning_rate).update(grads, opt_state)
+    grads = grad(loss_fn)(params, x, y)
+    updates, optimizer_state = optimizer.update(grads, optimizer_state)
     new_params = optax.apply_updates(params, updates)
-    return new_params, new_opt_state
+    return new_params, optimizer_state
 
-# Initialize optimizer state for GPT-2
-opt_state = optax.sgd(learning_rate=0.01).init(params)
-print_every = 10
+def evaluate(params, rng_key, data, block_size, batch_size):
+    losses = []
+    for _ in range(eval_iters):
+        rng_key, subkey = random.split(rng_key)
+        x, y = get_batch('val', data, data, block_size, batch_size, subkey)
+        _, loss = hk_model.apply(params, rng_key, x, y)
+        losses.append(loss)
+    return jnp.mean(jnp.array(losses))
 
-# Example training loop for GPT-2
-for iter_num in range(max_iters):
-    params, opt_state = gpt2_update(params, inputs, targets, learning_rate=0.01)
-    
-    if iter_num % print_every == 0 or iter_num == max_iters - 1:
-        current_loss = gpt2_loss_fn(params, inputs, targets)
-        print(f"Iteration {iter_num}, Loss: {current_loss:.4f}")  
+# Initialize the model parameters
+rng_key = jax.random.PRNGKey(42)
+x, y = get_batch('train', train_data, val_data, block_size, batch_size, rng_key)
+params = hk_model.init(rng_key, x, y)
 
-# generate the text
+# Create the optimizer
+optimizer = optax.adam(learning_rate)
+optimizer_state = optimizer.init(params)
 
-def generate(model, params, start_sequence, max_new_tokens, temperature=1.0):
-    generated_tokens = encode(start_sequence)
-    
-    for _ in range(max_new_tokens):
-        # Convert the generated tokens to a JAX array
-        input_tokens = jnp.array(generated_tokens[-block_size:], dtype=jnp.int32)[None, :]
-        
-        # Get the model predictions (logits)
-        logits = model.apply(params, None, input_tokens)
-        
-        # Apply temperature scaling to the logits
-        logits = logits[:, -1, :] / temperature
-        
-        # Convert logits to probabilities using softmax
-        probs = jax.nn.softmax(logits, axis=-1)
-        
-        # Sample the next token from the probability distribution
-        next_token = jax.random.categorical(jax.random.PRNGKey(0), probs).item()
-        
-        # Append the sampled token to the generated sequence
-        generated_tokens.append(next_token)
-    
-    # Decode the generated tokens back to text
-    generated_text = decode(generated_tokens)
-    
-    return generated_text
+# Training loop
+for iter in range(max_iters):
+    rng_key, subkey = random.split(rng_key)
+    x, y = get_batch('train', train_data, val_data, block_size, batch_size, subkey)
+    params, optimizer_state = train_step(params, rng_key, x, y, optimizer_state)
 
-start_sequence = "The quick brown fox"
-max_new_tokens = 20
-temperature = 1.0
+    if iter % eval_interval == 0:
+        val_loss = evaluate(params, rng_key, val_data, block_size, batch_size)
+        print(f"Iteration {iter}: Validation Loss = {val_loss:.4f}")
 
-generated_text = generate(gpt2_model, params, start_sequence, max_new_tokens, temperature)
+input(f'training done, Proceed ? ')        
+
+# Generate text from the trained model
+context = jnp.array([[0]], dtype=jnp.int32)
+rng_key, subkey = random.split(rng_key)
+generated_indices = hk_generate.apply(params, rng_key, None, context, max_new_tokens=500)
+generated_text = decode(generated_indices[0].tolist())
 print(generated_text)
