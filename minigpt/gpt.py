@@ -147,13 +147,19 @@ def model_fn(vocab_size, n_embd, n_head, n_layer, block_size, dropout):
         return model(idx, targets)
     return forward_fn
 
-def generate_fn( rng_key,tokens, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout):
+# def generate_fn( rng_key,tokens, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout):
+#     model = GPTLanguageModel(vocab_size, n_embd, n_head, n_layer, block_size, dropout)
+#     return model.generate(tokens, max_new_tokens, rng_key)
+
+def generate_fn(params, rng_key, context, max_new_tokens):
     model = GPTLanguageModel(vocab_size, n_embd, n_head, n_layer, block_size, dropout)
-    return model.generate(tokens, max_new_tokens, rng_key)
+    rng_key, subkey = random.split(rng_key)  # Splitting the rng_key for each iteration
+    return model.generate(context, max_new_tokens, subkey)
 
 # Create the model
 hk_model = hk.transform(lambda tokens, targets=None: model_fn(vocab_size, n_embd, n_head, n_layer, block_size, dropout)(tokens, targets))
-hk_generate = hk.transform(lambda rng_key, tokens, max_new_tokens: generate_fn(tokens, rng_key, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout))
+#hk_generate = hk.transform(lambda rng_key, tokens, max_new_tokens: generate_fn(tokens, rng_key, max_new_tokens, vocab_size, n_embd, n_head, n_layer, block_size, dropout))
+hk_generate = hk.transform(lambda rng_key, tokens, max_new_tokens : generate_fn(rng_key, tokens, max_new_tokens))
 
 # Initialize the model parameters
 rng_key = jax.random.PRNGKey(42)
@@ -166,7 +172,15 @@ print(f'logits are {logits}')
 print(f'loss is {loss}')
 
 input('now generating the text proceed? ')
+# Generate text from the trained model
+context = jnp.array([[0]], dtype=jnp.int32)
+rng_key = jax.random.PRNGKey(42)
+# rng_key = jnp.reshape(rng_key, (2,))
+rng_key, subkey = random.split(rng_key)
 
+generated_indices = hk_generate.apply(params, rng_key, None, context, max_new_tokens=50)
+generated_text = decode(generated_indices[0].tolist())
+print(generated_text)
 # Training loop
 input('Starting the training proceed ?')
 

@@ -1,0 +1,5 @@
+jax
+jaxlib
+haiku
+optax
+numpy
